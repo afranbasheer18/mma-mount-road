@@ -3168,7 +3168,7 @@ document.addEventListener(
     const account=read("currentUser",null);
     const loggedIn=!!(account&&account.role==="admin"&&app&&app.style.display!=="none"&&login&&!login.classList.contains("active"));
     const el=document.getElementById("adminViewerCount");
-    if(!loggedIn||presenceRequestPending||typeof api==="undefined")return;
+    if(!window.__mmaAdminSessionReady||document.visibilityState==="hidden"||!loggedIn||presenceRequestPending||typeof api==="undefined")return;
     presenceRequestPending=true;
     try{
       const response=await api.updateAdminPresence(viewerTabId);
@@ -3517,7 +3517,7 @@ document.addEventListener(
 
   function enforceRole(){const s=adminSession();if(!s)return;const secretary=s.role==="secretary";document.querySelectorAll('.side .navbtn').forEach(b=>{const id=b.dataset.s;if(secretary&&["users","bills","userAccess"].includes(id))b.style.display="none";});const name=document.querySelector(".admin-name");if(name)name.textContent=s.name||"Admin";}
 
-  function init(){applyTheme();ensureAdminUI();patchNavigation();patchLogout();patchCutoff();patchMenus();patchInvitation();patchSendNotification();renderExtraSections();enforceRole();updateViewerPresence();setInterval(()=>{renderAdminBell();renderAdminNotifications();renderRequestList();refreshAdminRequestNavigation();renderAccess();updateViewerPresence();if(typeof window.refreshNoFoodRequests==='function')window.refreshNoFoodRequests();},60000);}
+  function init(){applyTheme();ensureAdminUI();patchNavigation();patchLogout();patchCutoff();patchMenus();patchInvitation();patchSendNotification();renderExtraSections();enforceRole();updateViewerPresence();setInterval(()=>{if(!window.__mmaAdminSessionReady||document.visibilityState==="hidden")return;renderAdminBell();renderAdminNotifications();renderRequestList();refreshAdminRequestNavigation();renderAccess();updateViewerPresence();if(typeof window.refreshNoFoodRequests==='function')window.refreshNoFoodRequests();},60000);}
   document.addEventListener("DOMContentLoaded",init);
   window.addEventListener("storage",()=>{renderAdminBell();renderAdminNotifications();renderRequestList();renderRegistrationRequests();renderAccess();updateViewerPresence();});
 })();
@@ -6001,11 +6001,11 @@ async function baseInitApp() {
   // Render dashboard AFTER data is loaded to ensure correct values
   await renderDashboard();
   await Promise.all([
-    renderUsers(),
-    renderMenu(),
+    renderUsers(true),
+    renderMenu(true),
     renderEntries(),
     renderRecords(),
-    renderNoFoodRequests(),
+    renderNoFoodRequests(true),
     renderBills(),
     renderNotifHistory(),
     renderFeedback()
@@ -6021,14 +6021,20 @@ function escapeApiHtml(value) {
 
 let noFoodRefreshBusy = false;
 
-async function renderNoFoodRequests() {
+async function renderNoFoodRequests(useCachedData) {
   const box = document.getElementById("noFoodRequestsRoot");
   if (noFoodRefreshBusy || document.getElementById("login")?.classList.contains("active")) return;
   noFoodRefreshBusy = true;
   try {
-    const response = await api.getNoFoodRequests("pending");
-    const requests = Array.isArray(response.requests) ? response.requests : [];
-    localStorage.setItem("mma_noFoodRequests", JSON.stringify(requests));
+    let requests;
+    if (useCachedData) {
+      requests = store.get("noFoodRequests", []);
+    } else {
+      const response = await api.getNoFoodRequests("pending");
+      requests = Array.isArray(response.requests) ? response.requests : [];
+      localStorage.setItem("mma_noFoodRequests", JSON.stringify(requests));
+    }
+    if (!Array.isArray(requests)) requests = [];
     if (!box) return;
     if (!requests.length) {
       box.innerHTML = '<div class="admin-empty">No pending no-food requests.</div>';
@@ -6105,7 +6111,13 @@ window.rejectNoFoodRequest = async function(requestId) {
 };
 
 setInterval(function() {
-  if (!document.getElementById("login")?.classList.contains("active")) renderNoFoodRequests();
+  if (
+    window.__mmaAdminSessionReady &&
+    document.visibilityState === "visible" &&
+    !document.getElementById("login")?.classList.contains("active")
+  ) {
+    renderNoFoodRequests();
+  }
 }, 20000);
 
 function renderAdminUsersTable() {
@@ -6135,17 +6147,21 @@ function renderAdminUsersTable() {
   }).join("");
 }
 
-async function renderUsers() {
+async function renderUsers(useCachedData) {
   const body = document.getElementById("usersBody");
   if (!body) return;
-  try {
-    const response = await api.getUsers();
-    users = response.users || [];
-    originalAdminStoreSet("users", users);
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    body.innerHTML = `<tr><td colspan="5">${escapeApiHtml(error.message || "Unable to load users.")}</td></tr>`;
-    return;
+  if (useCachedData) {
+    users = store.get("users", []);
+  } else {
+    try {
+      const response = await api.getUsers();
+      users = response.users || [];
+      originalAdminStoreSet("users", users);
+    } catch (error) {
+      console.error("Error fetching users:", error);
+      body.innerHTML = `<tr><td colspan="5">${escapeApiHtml(error.message || "Unable to load users.")}</td></tr>`;
+      return;
+    }
   }
 
   const roomFilter = document.getElementById("usersRoomFilter");
@@ -6258,12 +6274,12 @@ async function toggleUserStatus(userId) {
 }
 
 // Modified renderMenu to use API
-async function renderMenu() {
+async function renderMenu(useCachedData) {
   const todayForm = document.getElementById("todayMenuForm");
   const weekBody = document.getElementById("weekBody");
   try {
-    const todayMenu = await api.getTodayMenu();
-    const weeklyMenu = await api.getWeeklyMenu();
+    const todayMenu = useCachedData ? store.get("todayMenu", {}) : await api.getTodayMenu();
+    const weeklyMenu = useCachedData ? store.get("weekMenu", []) : await api.getWeeklyMenu();
     const weekMenu = Array.isArray(weeklyMenu) ? weeklyMenu : [];
     localStorage.setItem("mma_todayMenu", JSON.stringify(todayMenu));
     localStorage.setItem("mma_weekMenu", JSON.stringify(weekMenu));

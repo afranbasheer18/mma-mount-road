@@ -201,10 +201,93 @@ test("admin logout clears the client user and redirects to common login", async 
   assert.deepEqual(destinations, ["/student"]);
 });
 
+test("admin startup renders its preloaded datasets without repeating API reads", async () => {
+  const requests = [];
+  const usersBody = { innerHTML: "" };
+  const noFoodBox = { innerHTML: "" };
+  const todayMenuForm = { innerHTML: "" };
+  const weekBody = { innerHTML: "" };
+  const context = vm.createContext({
+    api: {
+      getUsers() {
+        requests.push("users");
+        throw new Error("startup should use the preloaded users");
+      },
+      getNoFoodRequests() {
+        requests.push("no-food");
+        throw new Error("startup should use the preloaded requests");
+      },
+      getTodayMenu() {
+        requests.push("today-menu");
+        throw new Error("startup should use the preloaded menu");
+      },
+      getWeeklyMenu() {
+        requests.push("weekly-menu");
+        throw new Error("startup should use the preloaded menu");
+      },
+    },
+    document: {
+      getElementById(id) {
+        if (id === "usersBody") return usersBody;
+        if (id === "noFoodRequestsRoot") return noFoodBox;
+        if (id === "todayMenuForm") return todayMenuForm;
+        if (id === "weekBody") return weekBody;
+        if (id === "login") return { classList: { contains: () => false } };
+        return null;
+      },
+    },
+    escapeApiHtml: (value) => String(value),
+    renderAdminUsersTable() {},
+    renderFoodPoints() {},
+    store: {
+      get(key) {
+        if (key === "users") return [{ id: "S001" }];
+        if (key === "todayMenu") return { breakfast: "Idli" };
+        if (key === "weekMenu") return [{ day: "Mon", b: "Idli", l: "Rice", d: "Chapati" }];
+        return [];
+      },
+    },
+    window: {},
+    console: { error() {} },
+    localStorage: { setItem() {} },
+  });
+  vm.runInContext(
+    [
+      "let users = [];",
+      "let noFoodRefreshBusy = false;",
+      extractBetween(
+        adminScriptSource,
+        "async function renderUsers(useCachedData) {",
+        "\nasync function saveUser() {",
+      ),
+      extractBetween(
+        adminScriptSource,
+        "async function renderNoFoodRequests(useCachedData) {",
+        "\nwindow.refreshNoFoodRequests = renderNoFoodRequests;",
+      ),
+      extractBetween(
+        adminScriptSource,
+        "async function renderMenu(useCachedData) {",
+        "\n// Modified saveTodayMenu to use API",
+      ),
+    ].join("\n"),
+    context,
+  );
+
+  await vm.runInContext("renderUsers(true)", context);
+  await vm.runInContext("renderNoFoodRequests(true)", context);
+  await vm.runInContext("renderMenu(true)", context);
+
+  assert.deepEqual(requests, []);
+  assert.match(noFoodBox.innerHTML, /No pending no-food requests/);
+  assert.match(todayMenuForm.innerHTML, /Idli/);
+  assert.match(weekBody.innerHTML, /Chapati/);
+});
+
 test("student form invokes the real handler and posts to the registration API", async () => {
   assert.match(studentTemplate, /onclick="submitEnrollment\(\)">Submit Enrollment/);
-  assert.match(studentTemplate, /app\.js'\) \}\}\?v=4/);
-  assert.match(studentTemplate, /student\.js'\) \}\}\?v=1/);
+  assert.match(studentTemplate, /app\.js'\) \}\}\?v=6/);
+  assert.match(studentTemplate, /student\.js'\) \}\}\?v=3/);
 
   const { context, requests, card } = createBrowserContext({
     success: true,
@@ -243,4 +326,55 @@ test("backend validation errors are displayed in the enrollment form", async () 
     `${backendMessage} [POST /auth/register]`,
   );
   assert.equal(fields.enrollErr.style.display, "block");
+});
+
+test("API client shares concurrent identical GETs and allows later refreshes", async () => {
+  const requests = [];
+  let releaseRequest;
+  const context = vm.createContext({
+    window: {
+      location: { origin: "https://mma-mount-road1.vercel.app" },
+      dispatchEvent() {},
+    },
+    Event: class Event {},
+    console: { log() {}, error() {} },
+    fetch: (url, options) => {
+      requests.push({ url, options });
+      return new Promise((resolve) => {
+        releaseRequest = () => resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true }),
+        });
+      });
+    },
+  });
+  context.window.window = context.window;
+  const apiClient = extractBetween(
+    appSource,
+    "class APIClient {",
+    "\nconst api = new APIClient();",
+  );
+  vm.runInContext(
+    [
+      "const API_BASE_URL = `${window.location.origin}/api`;",
+      "const API_DEBUG = false;",
+      apiClient,
+      "const api = new APIClient();",
+    ].join("\n"),
+    context,
+  );
+
+  const first = vm.runInContext("api.request('/menu/weekly')", context);
+  const second = vm.runInContext("api.request('/menu/weekly')", context);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  releaseRequest();
+  await Promise.all([first, second]);
+
+  const later = vm.runInContext("api.request('/menu/weekly')", context);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  releaseRequest();
+  await later;
 });

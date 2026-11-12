@@ -32,7 +32,7 @@ html[data-page="home"] .hero{
             rgba(29, 20, 65, .78),
             rgba(18, 13, 39, .88)
         ),
-        url("/static/building.jpg") center / cover no-repeat;
+        url("/static/building.jpg?v=2") center / cover no-repeat;
 }
 
 html[data-page="home"] header{
@@ -391,7 +391,7 @@ html[data-page="admin"] .modal .confirm.add{background:var(--violet);color:#fff;
   html[data-page="admin"] .grid3{grid-template-columns:1fr;}
 }
 @media (prefers-color-scheme:dark){
-  html[data-page="admin"]:not([data-theme="light"]){--bg:#17131F;--card:#221B33;--ink:#F1EEFA;--sub:#A79FBF;--line:#332A4A;--violet-light:#2D2447;}
+  html[data-page="admin"]:not([data-theme="light"]){color-scheme:dark;--bg:#17131F;--card:#221B33;--ink:#F1EEFA;--sub:#A79FBF;--line:#332A4A;--violet-light:#2D2447;}
   html[data-page="admin"] header.top{background:var(--card);}
 }
 
@@ -466,7 +466,7 @@ html[data-page="admin"] .cancellation-controls{display:flex;align-items:end;gap:
 html[data-page="admin"] .cancellation-controls label{display:grid;gap:6px;color:var(--sub);font-size:12px;font-weight:600}html[data-page="admin"] .entry-filter-tools input,
 html[data-page="admin"] .cancellation-controls input,
 html[data-page="admin"] .cancellation-controls select,
-html[data-page="admin"] .cancellation-controls textarea{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#FBFAFD;color:var(--ink);font:inherit}html[data-page="admin"] .cancellation-controls label{flex:1;min-width:180px}html[data-page="admin"] .cancellation-controls textarea{resize:vertical}html[data-page="admin"] .entry-report-summary{display:flex;gap:14px;flex-wrap:wrap;color:var(--sub);font-size:13px;margin:10px 0}html[data-page="admin"] .entry-report-status,
+html[data-page="admin"] .cancellation-controls textarea{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font:inherit}html[data-page="admin"] .cancellation-controls label{flex:1;min-width:180px}html[data-page="admin"] .cancellation-controls textarea{resize:vertical}html[data-page="admin"] .cancellation-controls textarea::placeholder{color:var(--sub);opacity:1}html[data-page="admin"] .cancellation-controls select option{background:var(--card);color:var(--ink)}html[data-page="admin"] .entry-report-summary{display:flex;gap:14px;flex-wrap:wrap;color:var(--sub);font-size:13px;margin:10px 0}html[data-page="admin"] .entry-report-status,
 html[data-page="admin"] .cancellation-status{padding:10px 0;color:var(--sub);font-size:13px}html[data-page="admin"] .cancelled-meal{color:var(--error);font-weight:700}html[data-page="admin"] .cancellation-item{padding:12px 0;border-bottom:1px solid var(--line);font-size:13px}html[data-page="admin"] .cancellation-item:last-child{border-bottom:0}html[data-page="admin"] .cancellation-item small{display:block;color:var(--sub);margin-top:4px}html[data-page="admin"] .cancellation-dashboard-card .dash-note{margin-top:0}
 
 /* Hide authentication screen after a valid session; prevents the login card from remaining above the app. */
@@ -695,7 +695,7 @@ html[data-page="student"] #login{
             rgba(0, 0, 0, 0.45),
             rgba(0, 0, 0, 0.45)
         ),
-        url("/static/building.jpg") center center / cover no-repeat;
+        url("/static/building.jpg?v=2") center center / cover no-repeat;
 
     box-sizing: border-box;
 }
@@ -1153,6 +1153,16 @@ html[data-page="admin"] input[type="datetime-local"]{
   color:var(--ink);
   accent-color:var(--violet);
   font:inherit;
+}
+html[data-page="admin"] input[type="date"]::-webkit-datetime-edit,
+html[data-page="admin"] input[type="date"]::-webkit-datetime-edit-text,
+html[data-page="admin"] input[type="date"]::-webkit-datetime-edit-month-field,
+html[data-page="admin"] input[type="date"]::-webkit-datetime-edit-day-field,
+html[data-page="admin"] input[type="date"]::-webkit-datetime-edit-year-field,
+html[data-page="admin"] input[type="month"]::-webkit-datetime-edit,
+html[data-page="admin"] input[type="datetime-local"]::-webkit-datetime-edit{
+  color:var(--ink);
+  -webkit-text-fill-color:var(--ink);
 }
 html[data-page="admin"] input[type="date"]:focus,
 html[data-page="admin"] input[type="month"]:focus,

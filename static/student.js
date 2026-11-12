@@ -3853,8 +3853,10 @@ async function doLogin() {
       window.__mmaStudentSessionExpired = false;
       currentUser = response.user;
       apiStore.set("currentUserId", currentUser.id);
-      await refreshStudentBusinessData();
-      await refreshStudentLatestMenu();
+      await Promise.all([
+        refreshStudentBusinessData(),
+        refreshStudentLatestMenu()
+      ]);
 
       if (errorBox) errorBox.style.display = "none";
 
@@ -3982,7 +3984,6 @@ document.addEventListener("DOMContentLoaded", function() {
     currentUser = response.user;
     // Refresh data before rendering to ensure saved values are loaded
     await refreshStudentBusinessData();
-    await refreshStudentEntryHistory();
     document.getElementById("login")?.classList.remove("active");
     document.getElementById("enroll")?.classList.remove("active");
     const app = document.getElementById("app");

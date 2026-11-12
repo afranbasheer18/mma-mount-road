@@ -90,8 +90,31 @@ const API_BASE_URL = window.MMA_API_BASE_URL ||
 const API_DEBUG = window.MMA_API_DEBUG === true;
 
 class APIClient {
-  async request(endpoint, options = {}) {
+  constructor() {
+    this.inFlightGets = new Map();
+  }
+
+  request(endpoint, options = {}) {
     const url = `${API_BASE_URL}${endpoint}`;
+    const method = String(options.method || 'GET').toUpperCase();
+    if (method === 'GET') {
+      const pending = this.inFlightGets.get(url);
+      if (pending) return pending;
+    }
+
+    const request = this.performRequest(url, endpoint, options);
+    if (method !== 'GET') return request;
+
+    const trackedRequest = request.finally(() => {
+      if (this.inFlightGets.get(url) === trackedRequest) {
+        this.inFlightGets.delete(url);
+      }
+    });
+    this.inFlightGets.set(url, trackedRequest);
+    return trackedRequest;
+  }
+
+  async performRequest(url, endpoint, options) {
     if (API_DEBUG) {
       console.log("API REQUEST METHOD:", options.method || "GET");
     }

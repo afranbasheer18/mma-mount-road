@@ -69,6 +69,95 @@ class DatabaseStartupTests(unittest.TestCase):
         initialize.assert_not_called()
         self.assertIn("/health", {rule.rule for rule in app.url_map.iter_rules()})
 
+    def test_versioned_static_assets_receive_long_lived_cache_headers(self):
+        response = self.create_test_app().test_client().get(
+            "/static/home.js?v=2"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("public", response.headers["Cache-Control"])
+        self.assertIn("max-age=31536000", response.headers["Cache-Control"])
+        self.assertIn("immutable", response.headers["Cache-Control"])
+        self.assertNotIn("no-cache", response.headers["Cache-Control"])
+        response.close()
+
+        unversioned = self.create_test_app().test_client().get("/static/home.js")
+        self.assertIn("max-age=3600", unversioned.headers["Cache-Control"])
+        self.assertNotIn("immutable", unversioned.headers["Cache-Control"])
+        unversioned.close()
+
+    def test_entries_resolve_all_user_names_with_one_projected_query(self):
+        from datetime import date, datetime, timezone
+        from werkzeug.security import generate_password_hash
+
+        admin_data = {
+            "id": "admin-1",
+            "name": "Administrator",
+            "role": "admin",
+            "status": "active",
+            "password_hash": generate_password_hash("test-password"),
+            "auth_version": 1,
+        }
+        entries = [
+            {"user_id": "STU-1", "date": "2026-11-12", "breakfast": 1},
+            {"user_id": "STU-2", "date": "2026-11-12", "lunch": 1},
+            {"user_id": "STU-3", "date": "2026-11-12", "dinner": 1},
+        ]
+        entry_cursor = Mock()
+        entry_cursor.sort.return_value = entries
+        entries_collection = Mock()
+        entries_collection.find.return_value = entry_cursor
+        users_collection = Mock()
+        users_collection.find.return_value = [
+            {"id": "STU-1", "name": "One"},
+            {"id": "STU-2", "name": "Two"},
+            {"id": "STU-3", "name": "Three"},
+        ]
+        app = self.create_test_app()
+        client = app.test_client()
+        with patch.object(backend, "get_user_by_identity", return_value=admin_data):
+            login = client.post(
+                "/api/auth/login",
+                json={"uid": "admin-1", "pw": "test-password"},
+            )
+        self.assertEqual(login.status_code, 200)
+
+        with (
+            patch.object(backend, "get_user", return_value=admin_data) as get_user,
+            patch.object(
+                backend,
+                "get_collection",
+                side_effect=lambda name: {
+                    "mess_entries": entries_collection,
+                    "users": users_collection,
+                }[name],
+            ),
+            patch.object(
+                backend,
+                "load_approved_no_food_map",
+                return_value=({}, None),
+            ),
+            patch.object(backend, "list_cancellations", return_value=[]),
+            patch.object(backend, "get_settings", return_value={}),
+            patch.object(
+                backend,
+                "mess_now",
+                return_value=datetime(2026, 11, 12, tzinfo=timezone.utc),
+            ),
+            patch.object(backend, "cooking_date", return_value=date(2026, 11, 12)),
+        ):
+            response = client.get("/api/entries/?date=2026-11-12")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [entry["user_name"] for entry in response.json["entries"]],
+            ["One", "Two", "Three"],
+        )
+        users_collection.find.assert_called_once_with(
+            {"id": {"$in": ["STU-1", "STU-2", "STU-3"]}},
+            {"id": 1, "name": 1},
+        )
+        get_user.assert_called_once()
+
     def test_database_client_is_initialized_once_with_serverless_pool_limits(self):
         class FakeDatabase:
             def command(self, name):

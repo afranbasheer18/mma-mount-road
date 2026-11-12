@@ -2985,11 +2985,22 @@ def get_entries_route():
         return error_response
     latest = [apply_approved_no_food(entry, approved) for entry in latest]
     
+    user_ids = list(dict.fromkeys(
+        str(entry.get('user_id') or entry.get('user') or '').strip().upper()
+        for entry in latest
+        if entry.get('user_id') or entry.get('user')
+    ))
     users_by_id = {}
+    if user_ids:
+        for user in get_collection('users').find(
+            {'id': {'$in': user_ids}},
+            {'id': 1, 'name': 1},
+        ):
+            user_id = str(user.get('id') or '')
+            if user_id and user_id not in users_by_id:
+                users_by_id[user_id] = user
     for entry in latest:
         user_id = str(entry.get('user_id') or entry.get('user') or '').upper()
-        if user_id and user_id not in users_by_id:
-            users_by_id[user_id] = get_user(user_id) or {}
         entry['user_name'] = users_by_id.get(user_id, {}).get('name') or user_id
     if not month_str:
         settings = get_settings()
@@ -6403,6 +6414,16 @@ def create_app(config_name="default"):
     @app.route("/favicon.ico")
     def favicon():
         return "", 204
+
+    @app.after_request
+    def cache_static_assets(response):
+        if request.endpoint == "static" and response.status_code in {200, 304}:
+            is_versioned = bool(request.args.get("v"))
+            response.cache_control.no_cache = None
+            response.cache_control.public = True
+            response.cache_control.max_age = 31536000 if is_versioned else 3600
+            response.cache_control.immutable = is_versioned or None
+        return response
 
     @app.route("/health")
     def health_check():
