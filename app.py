@@ -8,17 +8,20 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hmac import compare_digest
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from bson import ObjectId
+import certifi
+from click import ClickException
 from dotenv import dotenv_values, load_dotenv
 from flask import (
     Blueprint,
     Flask,
     current_app,
     jsonify,
+    redirect,
     render_template,
     request,
     session,
@@ -27,7 +30,13 @@ from flask_cors import CORS
 from flask_login import LoginManager, UserMixin, current_user, login_required, login_user, logout_user
 from flask_pymongo import PyMongo
 from pymongo import ASCENDING, DESCENDING, ReplaceOne, ReturnDocument
-from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
+from pymongo.errors import (
+    ConfigurationError,
+    ConnectionFailure,
+    DuplicateKeyError,
+    PyMongoError,
+    ServerSelectionTimeoutError,
+)
 from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = Path(__file__).resolve().parent
@@ -37,22 +46,30 @@ if (ROOT / ".env").exists() and os.environ.get("FLASK_CONFIG") != "production":
 mongo = PyMongo()
 
 
+class MongoInitializationError(Exception):
+    def __init__(self, category):
+        super().__init__(category)
+        self.category = category
+
+
 class Config:
-    SECRET_KEY = os.environ.get(
-        "FLASK_SECRET_KEY", "dev-secret-key-change-in-production-do-not-commit"
-    )
-    MONGO_URI = os.environ.get(
-        "MONGODB_URI",
-        "mongodb+srv://mma_hostel_app:SMlkD396tBzkUprA@cluster0.vle5uyw.mongodb.net/mma_hostel_mess",
-    )
-    MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "mma_hostel_mess")
-    FRONTEND_ORIGIN = (
-        os.environ.get("FRONTEND_ORIGIN")
-        or "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8080,http://127.0.0.1:8080,http://10.246.245.54:5500"
-    )
+    SECRET_KEY = os.environ.get("FLASK_SECRET_KEY")
+    MONGODB_URI = os.environ.get("MONGODB_URI")
+    MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE")
+    FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN")
+    SESSION_PERMANENT = True
+    PERMANENT_SESSION_LIFETIME = timedelta(days=30)
 
 
 class DevelopmentConfig(Config):
+    SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or secrets.token_urlsafe(32)
+    MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://127.0.0.1:27017/")
+    MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "mma_hostel_mess")
+    FRONTEND_ORIGIN = os.environ.get(
+        "FRONTEND_ORIGIN",
+        "http://localhost:5500,http://127.0.0.1:5500,"
+        "http://localhost:8080,http://127.0.0.1:8080",
+    )
     DEBUG = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = False
@@ -69,9 +86,11 @@ class TestingConfig:
     DEBUG = True
     TESTING = True
     SECRET_KEY = "test-only-session-secret"
-    MONGO_URI = "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=250"
+    MONGODB_URI = "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=250"
     MONGODB_DATABASE = "mma_hostel_mess_test"
     FRONTEND_ORIGIN = "http://localhost:5000"
+    SESSION_PERMANENT = True
+    PERMANENT_SESSION_LIFETIME = timedelta(days=30)
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = False
 
@@ -351,7 +370,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
-from pymongo.errors import DuplicateKeyError, OperationFailure
+from pymongo.errors import DuplicateKeyError
 from werkzeug.security import generate_password_hash
 
 
@@ -374,110 +393,81 @@ def get_collection(name):
 
 
 def ensure_indexes(app):
-    """Create identity and lookup indexes used by idempotent writes."""
-    for collection_name, index_name, keys in (
-        ("bills", "bill_user_month_unique", [("user_id", 1), ("billing_month", 1)]),
-        ("bill_drafts", "bill_draft_user_month_unique", [("user_id", 1), ("billing_month", 1)]),
-        ("general_settings", "general_settings_key_unique", [("key", 1)]),
-    ):
-        collection = get_collection(collection_name)
-        existing_indexes = collection.index_information()
-        if isinstance(existing_indexes, dict) and any(
-            index.get("key") == keys and index.get("unique") is True
-            for index in existing_indexes.values()
-        ):
-            continue
-        try:
-            collection.create_index(
-                keys,
-                unique=True,
-                name=index_name,
-            )
-        except DuplicateKeyError:
-            app.logger.exception(
-                "Could not create %s because duplicate identity records exist in %s. "
-                "No existing records were removed.",
-                index_name,
-                collection_name,
-            )
-        except OperationFailure:
-            app.logger.exception(
-                "Could not ensure %s on %s. Existing records and indexes were not removed.",
-                index_name,
-                collection_name,
-            )
-
+    """Apply additive indexes; run explicitly using ``flask ensure-indexes``."""
     indexes = (
-        ("mess_entries", [("user_id", 1), ("date", 1)], "user_date_v2_unique"),
-        ("meal_records", [("user_id", 1), ("date", 1)], "user_date_v2_unique"),
-    )
-    for collection_name, keys, index_name in indexes:
-        try:
-            get_collection(collection_name).create_index(
-                keys,
-                unique=True,
-                name=index_name,
-                partialFilterExpression={"writeVersion": 2},
-            )
-        except DuplicateKeyError:
-            app.logger.exception(
-                "Could not create %s on %s because legacy duplicate user/date records exist. "
-                "No existing records were removed.",
-                index_name,
-                collection_name,
-            )
-    get_collection("mess_entries").create_index(
-        [("date", 1), ("updated_at", -1)],
-        name="entry_date_updated",
-    )
-    get_collection("meal_records").create_index(
-        [("date", 1), ("updated_at", -1)],
-        name="meal_record_date_updated",
-    )
-    try:
-        get_collection("meal_cancellations").create_index(
+        (
+            "bills",
+            [("user_id", 1), ("billing_month", 1)],
+            "bill_user_month_unique",
+            {"unique": True},
+        ),
+        (
+            "bill_drafts",
+            [("user_id", 1), ("billing_month", 1)],
+            "bill_draft_user_month_unique",
+            {"unique": True},
+        ),
+        ("general_settings", [("key", 1)], "general_settings_key_unique", {"unique": True}),
+        (
+            "mess_entries",
+            [("user_id", 1), ("date", 1)],
+            "user_date_v2_unique",
+            {"unique": True, "partialFilterExpression": {"writeVersion": 2}},
+        ),
+        (
+            "meal_records",
+            [("user_id", 1), ("date", 1)],
+            "user_date_v2_unique",
+            {"unique": True, "partialFilterExpression": {"writeVersion": 2}},
+        ),
+        ("mess_entries", [("date", 1), ("updated_at", -1)], "entry_date_updated", {}),
+        ("meal_records", [("date", 1), ("updated_at", -1)], "meal_record_date_updated", {}),
+        (
+            "meal_cancellations",
             [("date", 1), ("meal_type", 1)],
-            unique=True,
-            name="meal_cancellation_date_meal_unique",
-        )
-    except DuplicateKeyError:
-        app.logger.exception(
-            "Could not create the unique meal cancellation index because legacy "
-            "duplicate records exist. No existing records were removed."
-        )
-    for collection_name, index_name in (
-        ("notifications", "notification_dedupe_unique"),
-        ("meal_cancellation_adjustments", "cancellation_adjustment_dedupe_unique"),
-    ):
-        try:
-            get_collection(collection_name).create_index(
-                [("dedupeKey", 1)],
-                unique=True,
-                name=index_name,
-                partialFilterExpression={"dedupeKey": {"$type": "string"}},
-            )
-        except DuplicateKeyError:
-            app.logger.exception(
-                "Could not create %s because existing duplicate dedupe keys exist. "
-                "No existing records were removed.",
-                index_name,
-            )
-
-    try:
-        get_collection("no_food_requests").create_index(
+            "meal_cancellation_date_meal_unique",
+            {"unique": True},
+        ),
+        (
+            "notifications",
+            [("dedupeKey", 1)],
+            "notification_dedupe_unique",
+            {"unique": True, "partialFilterExpression": {"dedupeKey": {"$type": "string"}}},
+        ),
+        (
+            "meal_cancellation_adjustments",
+            [("dedupeKey", 1)],
+            "cancellation_adjustment_dedupe_unique",
+            {"unique": True, "partialFilterExpression": {"dedupeKey": {"$type": "string"}}},
+        ),
+        (
+            "no_food_requests",
             [("user_id", 1), ("date", 1), ("meal", 1)],
-            unique=True,
-            name="no_food_user_date_meal_unique",
-        )
-    except DuplicateKeyError:
-        app.logger.exception(
-            "Could not create the unique no-food request index because legacy "
-            "duplicate records exist. No existing records were removed."
-        )
-    get_collection("no_food_requests").create_index(
-        [("status", 1), ("date", 1), ("requested_at", -1)],
-        name="no_food_status_date_requested",
+            "no_food_user_date_meal_unique",
+            {"unique": True},
+        ),
+        (
+            "no_food_requests",
+            [("status", 1), ("date", 1), ("requested_at", -1)],
+            "no_food_status_date_requested",
+            {},
+        ),
     )
+    for collection_name, keys, index_name, options in indexes:
+        collection = get_collection(collection_name)
+        if index_name in {
+            "bill_user_month_unique",
+            "bill_draft_user_month_unique",
+            "general_settings_key_unique",
+        }:
+            existing_indexes = collection.index_information()
+            if any(
+                index.get("key") == keys and index.get("unique") is True
+                for index in existing_indexes.values()
+            ):
+                continue
+        collection.create_index(keys, name=index_name, **options)
+    app.logger.info("Ensured %d MongoDB indexes.", len(indexes))
 
 
 def normalize_email(email):
@@ -1125,7 +1115,7 @@ def get_settings():
 # --------------------------------------------------
 
 def create_registration(reg_data):
-    """Create a pending registration request with a hashed password."""
+    """Create a pending request, optionally linked to a user account."""
     data = dict(reg_data)
 
     password = data.pop("password", None)
@@ -1133,7 +1123,7 @@ def create_registration(reg_data):
     if password is not None:
         data["password_hash"] = generate_password_hash(password)
 
-    if not data.get("password_hash"):
+    if not data.get("password_hash") and not data.get("user_id"):
         raise ValueError("A password is required.")
 
     data["email"] = normalize_email(data.get("email"))
@@ -1851,13 +1841,26 @@ def login():
         return jsonify({'success': False, 'message': 'Invalid email/phone or password'}), 401
 
     if user_data.get('status') != 'active':
+        status = str(user_data.get('status') or '').strip().lower()
+        if status == 'pending' and str(user_data.get('role') or 'student').lower() == 'student':
+            return jsonify({
+                'success': False,
+                'message': 'Your enrollment is awaiting admin approval.',
+            }), 401
+        if status == 'rejected':
+            return jsonify({
+                'success': False,
+                'message': 'Your enrollment was rejected. Please contact an administrator.',
+            }), 401
         return jsonify({'success': False, 'message': 'This user account is inactive'}), 401
 
     user_obj = User(user_data)
     if user_obj.role not in {'admin', 'student'}:
         return jsonify({'success': False, 'message': 'This account cannot sign in'}), 403
 
+    session.clear()
     login_user(user_obj)
+    session.permanent = True
     session['auth_version'] = int(user_data.get('auth_version') or 0)
     return jsonify({'success': True, 'user': user_obj.to_dict()})
 
@@ -1891,15 +1894,46 @@ def register():
     if registration_identity_exists(email, phone):
         return jsonify({'success': False, 'message': 'This email or phone is already registered or awaiting approval'}), 409
 
-    # Create registration request
+    user_id = 'STU' + uuid4().hex[:8].upper()
+    while get_user(user_id):
+        user_id = 'STU' + uuid4().hex[:8].upper()
+
+    try:
+        create_user({
+            'id': user_id,
+            'name': name,
+            'room': room,
+            'phone': phone,
+            'email': email,
+            'password': password,
+            'role': 'student',
+            'status': 'pending',
+        })
+    except DuplicateKeyError:
+        return jsonify({
+            'success': False,
+            'message': 'This email or phone is already registered or awaiting approval',
+        }), 409
+
+    # Keep the existing admin approval queue, linked to the pending user.
     reg_data = {
+        'user_id': user_id,
         'name': name,
         'room': room,
         'phone': phone,
         'email': email,
-        'password': password
     }
-    registration = create_registration(reg_data)
+    try:
+        registration = create_registration(reg_data)
+    except DuplicateKeyError:
+        delete_user(user_id)
+        return jsonify({
+            'success': False,
+            'message': 'This email or phone is already registered or awaiting approval',
+        }), 409
+    except (PyMongoError, RuntimeError):
+        delete_user(user_id)
+        raise
     submitted_at = datetime.now(timezone.utc)
     registration_id = getattr(registration, 'inserted_id', None)
     dedupe_key = (
@@ -1929,6 +1963,7 @@ def register():
 @login_required
 def logout():
     logout_user()
+    session.clear()
     return jsonify({'success': True})
 
 @auth_bp.route('/current-user', methods=['GET'])
@@ -2566,7 +2601,10 @@ def get_users_route():
     if current_user.role != 'admin':
         return jsonify({'success': False, 'message': 'Unauthorized'}), 403
 
-    users = get_all_users()
+    users = [
+        user for user in get_all_users()
+        if user.get('status') != 'pending'
+    ]
     # Convert ObjectId to string and remove password_hash
     result = []
     for user in users:
@@ -2662,6 +2700,11 @@ def update_user_route(user_id):
     if 'status' in data:
         if not isinstance(data['status'], str) or data['status'] not in {'active', 'inactive'}:
             return jsonify({'success': False, 'message': 'Status must be active or inactive'}), 400
+        if user.get('status') in {'pending', 'rejected'}:
+            return jsonify({
+                'success': False,
+                'message': 'Enrollment accounts must be resolved from registration review.',
+            }), 409
         updates['status'] = data['status']
     if 'password' in data:
         if not isinstance(data['password'], str) or len(data['password']) < 6:
@@ -2681,6 +2724,12 @@ def delete_user_route(user_id):
     if not user:
         return jsonify({'success': False, 'message': 'User not found'}), 404
 
+    if user.get('status') == 'pending':
+        return jsonify({
+            'success': False,
+            'message': 'Pending enrollments must be rejected from registration review.',
+        }), 409
+
     delete_user(user_id.upper())
     return jsonify({'success': True})
 
@@ -2693,6 +2742,12 @@ def toggle_user_status(user_id):
     user = get_user(user_id.upper())
     if not user:
         return jsonify({'success': False, 'message': 'User not found'}), 404
+
+    if user.get('status') in {'pending', 'rejected'}:
+        return jsonify({
+            'success': False,
+            'message': 'Enrollment accounts must be resolved from registration review.',
+        }), 409
 
     new_status = 'inactive' if user.get('status') == 'active' else 'active'
     update_user(user_id.upper(), {'status': new_status})
@@ -2727,26 +2782,47 @@ def approve_registration(reg_id):
     if not reg or reg.get('status') != 'pending':
         return jsonify({'success': False, 'message': 'Registration not found'}), 404
 
-    base_id = 'STU' + reg_id[-8:].upper()
-    user_id = base_id
-    suffix = 2
-    while get_user(user_id):
-        user_id = f'{base_id}{suffix}'
-        suffix += 1
-    user_data = {
-        'id': user_id,
-        'name': reg['name'],
-        'room': reg['room'],
-        'phone': reg['phone'],
-        'email': reg['email'],
-        'password_hash': reg['password_hash'],
-        'role': 'student',
-        'status': 'active'
-    }
-    get_collection('users').insert_one(user_data)
+    user_id = reg.get('user_id')
+    if user_id:
+        user_data = get_user(user_id)
+        if not user_data or user_data.get('status') != 'pending':
+            return jsonify({
+                'success': False,
+                'message': 'The pending enrollment account was not found.',
+            }), 409
+        update_user(user_id, {'status': 'active'})
+        user_data['status'] = 'active'
+    else:
+        # Preserve compatibility with approval requests created before accounts
+        # were stored in the users collection at enrollment time.
+        if not reg.get('password_hash'):
+            return jsonify({
+                'success': False,
+                'message': 'Registration credentials are unavailable.',
+            }), 409
+        base_id = 'STU' + reg_id[-8:].upper()
+        user_id = base_id
+        suffix = 2
+        while get_user(user_id):
+            user_id = f'{base_id}{suffix}'
+            suffix += 1
+        user_data = {
+            'id': user_id,
+            'name': reg['name'],
+            'room': reg['room'],
+            'phone': reg['phone'],
+            'email': reg['email'],
+            'password_hash': reg['password_hash'],
+            'role': 'student',
+            'status': 'active'
+        }
+        get_collection('users').insert_one(user_data)
     update_registration(ObjectId(reg_id), {'status': 'approved'})
 
-    safe_user = {key: value for key, value in user_data.items() if key != 'password_hash'}
+    safe_user = {
+        key: user_data.get(key)
+        for key in ('id', 'name', 'room', 'phone', 'email', 'role', 'status')
+    }
     return jsonify({'success': True, 'user': safe_user})
 
 @users_bp.route('/registrations/<reg_id>/reject', methods=['POST'])
@@ -2760,6 +2836,10 @@ def reject_registration(reg_id):
     reg = get_collection('registration_requests').find_one({'_id': ObjectId(reg_id), 'status': 'pending'})
     if not reg:
         return jsonify({'success': False, 'message': 'Registration not found'}), 404
+    user_id = reg.get('user_id')
+    user = get_user(user_id) if user_id else None
+    if user and user.get('status') == 'pending':
+        update_user(user_id, {'status': 'rejected'})
     update_registration(ObjectId(reg_id), {'status': 'rejected'})
     return jsonify({'success': True})
 
@@ -6004,15 +6084,10 @@ def _is_strong_production_secret(secret):
     )
 
 
-DEFAULT_DEV_SECRET = "dev-secret-key-change-in-production-do-not-commit"
-
-
 def _reuses_local_development_secret(secret):
-    local_secret = DEFAULT_DEV_SECRET
+    local_secret = None
     if (ROOT / ".env").exists():
-        env_secret = dotenv_values(ROOT / ".env").get("FLASK_SECRET_KEY")
-        if env_secret:
-            local_secret = env_secret
+        local_secret = dotenv_values(ROOT / ".env").get("FLASK_SECRET_KEY")
     return (
         isinstance(local_secret, str)
         and bool(local_secret)
@@ -6036,6 +6111,61 @@ def _is_production_origin(origin):
         )
     except ValueError:
         return False
+
+
+def _validate_mongodb_uri(uri, is_production):
+    try:
+        parsed = urlsplit(uri)
+        options = {
+            key.lower(): value.strip().lower()
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        }
+    except ValueError:
+        raise ValueError("MONGODB_URI must be a valid MongoDB URI.") from None
+
+    if parsed.scheme not in {"mongodb", "mongodb+srv"} or not parsed.netloc:
+        raise ValueError("MONGODB_URI must use mongodb:// or mongodb+srv://.")
+
+    insecure_true_values = {"true", "1", "yes", "on"}
+    for option in (
+        "tlsinsecure",
+        "sslinsecure",
+        "tlsallowinvalidcertificates",
+        "tlsallowinvalidhostnames",
+    ):
+        if options.get(option) in insecure_true_values:
+            raise ValueError("MONGODB_URI must not disable TLS certificate verification.")
+    if options.get("sslvalidate") in {"false", "0", "no", "off"}:
+        raise ValueError("MONGODB_URI must not disable TLS certificate verification.")
+
+    configured_tls = options.get("tls", options.get("ssl"))
+    if configured_tls in {"false", "0", "no", "off"}:
+        raise ValueError("MONGODB_URI must not disable TLS.")
+    if is_production and parsed.scheme != "mongodb+srv" and configured_tls not in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }:
+        raise ValueError("Production MONGODB_URI must enable TLS.")
+
+    return parsed.scheme == "mongodb+srv" or is_production
+
+
+def _connection_failure_category(error):
+    if isinstance(error, ConfigurationError):
+        message = str(error).lower()
+        if "dns" in message or "_mongodb._tcp" in message:
+            return "srv_dns_failure"
+        return "invalid_mongodb_uri"
+    if isinstance(error, ServerSelectionTimeoutError):
+        message = str(error).lower()
+        if "ssl" in message or "tls" in message:
+            return "tls_handshake"
+        return "server_selection_timeout"
+    if isinstance(error, ConnectionFailure):
+        return "connection_failure"
+    return "database_error"
 
 
 @login_manager.unauthorized_handler
@@ -6083,7 +6213,7 @@ def create_app(config_name="default"):
         )
     if is_production and _reuses_local_development_secret(secret_key):
         raise ValueError(
-            "Production FLASK_SECRET_KEY must not reuse the default development secret."
+            "Production FLASK_SECRET_KEY must not reuse the local development secret."
         )
 
     app.config.update(
@@ -6112,13 +6242,14 @@ def create_app(config_name="default"):
             "queries, or fragments."
         )
 
-    mongo_uri = app.config.get("MONGO_URI")
+    mongo_uri = app.config.get("MONGODB_URI")
     if not isinstance(mongo_uri, str) or not mongo_uri.strip():
         raise ValueError("MONGODB_URI must be configured in the environment or app config.")
 
     database_name = app.config.get("MONGODB_DATABASE")
     if not isinstance(database_name, str) or not database_name.strip():
         raise ValueError("MONGODB_DATABASE is not configured.")
+    use_tls = _validate_mongodb_uri(mongo_uri, is_production)
 
     if app.debug:
         origins.extend([
@@ -6140,12 +6271,61 @@ def create_app(config_name="default"):
     )
     app.config["CORS_ALLOWED_ORIGINS"] = origins
 
-    mongo.init_app(app, uri=mongo_uri)
-    mongo.db = mongo.cx[database_name]
-    if mongo.db is None:
-        raise ValueError("MongoDB initialization did not select a database.")
-    if not app.testing:
-        ensure_indexes(app)
+    mongo_options = {
+        "connect": False,
+        "connectTimeoutMS": 5000,
+        "serverSelectionTimeoutMS": 5000,
+        "waitQueueTimeoutMS": 5000,
+        "maxPoolSize": 10,
+        "minPoolSize": 0,
+        "maxIdleTimeMS": 30000,
+        "tlsCAFile": certifi.where(),
+    }
+    if use_tls:
+        mongo_options["tls"] = True
+
+    def initialize_database():
+        if app.extensions.get("mma_mongo_initialized"):
+            return
+        try:
+            mongo.init_app(app, uri=mongo_uri, **mongo_options)
+            mongo.db = mongo.cx[database_name]
+        except ConfigurationError as error:
+            raise MongoInitializationError(
+                _connection_failure_category(error)
+            ) from None
+        app.extensions["mma_mongo_initialized"] = True
+
+    def unavailable_database_response(failure_category):
+        return jsonify({
+            "application": "available",
+            "database": "disconnected",
+            "database_name": database_name,
+            "connection_failure_category": failure_category,
+        }), 503
+
+    @app.cli.command("ensure-indexes")
+    def ensure_indexes_command():
+        """Run the additive MongoDB index migration explicitly."""
+        try:
+            initialize_database()
+            mongo.db.command("ping")
+            ensure_indexes(app)
+        except (MongoInitializationError, PyMongoError) as error:
+            error_category = (
+                error.category
+                if isinstance(error, MongoInitializationError)
+                else (
+                    _connection_failure_category(error)
+                    if isinstance(error, ConnectionFailure)
+                    else type(error).__name__
+                )
+            )
+            app.logger.error("MongoDB index migration failed (%s).", error_category)
+            raise ClickException(
+                f"MongoDB index migration failed ({error_category}); "
+                "no application records were changed."
+            ) from None
 
     @app.before_request
     def validate_request_origin():
@@ -6172,6 +6352,27 @@ def create_app(config_name="default"):
             }), 403
         return None
 
+    @app.before_request
+    def initialize_database_for_request():
+        has_login_session = bool(
+            session.get("_user_id")
+            or request.cookies.get(app.config.get("REMEMBER_COOKIE_NAME", "remember_token"))
+        )
+        public_endpoint = request.endpoint in {
+            "static",
+            "home",
+            "admin_page",
+            "student_page",
+            "favicon",
+        }
+        if not has_login_session and (
+            request.method == "OPTIONS"
+            or request.endpoint is None
+            or public_endpoint
+        ):
+            return None
+        initialize_database()
+
     login_manager.init_app(app)
     login_manager.login_view = "auth.login"
 
@@ -6191,6 +6392,8 @@ def create_app(config_name="default"):
 
     @app.route("/admin")
     def admin_page():
+        if not current_user.is_authenticated or current_user.role != "admin":
+            return redirect("/student")
         return render_template("admin.html")
 
     @app.route("/student")
@@ -6205,22 +6408,38 @@ def create_app(config_name="default"):
     def health_check():
         try:
             mongo.db.command("ping")
-            return jsonify({
-                "status": "healthy",
-                "database": "connected",
-                "database_name": database_name,
-            }), 200
-        except Exception:
-            app.logger.exception("MongoDB health check failed")
-            return jsonify({
-                "status": "unhealthy",
-                "database": "disconnected",
-            }), 500
+        except PyMongoError as error:
+            failure_category = _connection_failure_category(error)
+            app.logger.warning("MongoDB health check failed (%s).", failure_category)
+            return unavailable_database_response(failure_category)
+        return jsonify({
+            "application": "available",
+            "database": "connected",
+            "database_name": database_name,
+            "connection_failure_category": None,
+        }), 200
+
+    @app.errorhandler(ConnectionFailure)
+    def database_unavailable(error):
+        failure_category = _connection_failure_category(error)
+        app.logger.warning("MongoDB request failed (%s).", failure_category)
+        return unavailable_database_response(failure_category)
+
+    @app.errorhandler(MongoInitializationError)
+    def database_initialization_unavailable(error):
+        app.logger.warning(
+            "MongoDB initialization failed (%s).",
+            error.category,
+        )
+        return unavailable_database_response(error.category)
 
     return app
 
 
-config_name = os.environ.get("FLASK_CONFIG", "development")
+config_name = os.environ.get("FLASK_CONFIG")
+if os.environ.get("VERCEL") and config_name != "production":
+    raise RuntimeError("Set FLASK_CONFIG=production in the Vercel environment.")
+config_name = config_name or "development"
 app = create_app(config_name)
 
 if __name__ == "__main__":

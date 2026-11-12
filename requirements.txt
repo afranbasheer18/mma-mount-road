@@ -2,6 +2,7 @@ Flask==3.0.0
 Flask-CORS==4.0.0
 Flask-PyMongo==3.0.1
 pymongo==4.19.0
+certifi>=2025.1.31
 Flask-Login==0.6.3
 Werkzeug==3.0.1
 python-dotenv==1.0.0

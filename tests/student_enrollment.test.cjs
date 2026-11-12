@@ -6,19 +6,22 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
+const adminScriptSource = fs.readFileSync(
+  path.join(root, "static", "admin.js"),
+  "utf8",
+);
+const studentScriptSource = fs.readFileSync(
+  path.join(root, "static", "student.js"),
+  "utf8",
+);
 const studentTemplate = fs.readFileSync(
   path.join(root, "templates", "student.html"),
   "utf8",
 );
 
 function extractStudentScript() {
-  const marker = 'eval("/* =========================================================\\n   MMA UI BUTTON HELPERS';
-  const start = appSource.indexOf(marker);
-  assert.notEqual(start, -1, "student-page script eval must exist");
-  const end = appSource.indexOf("\n", start);
-  const statement = appSource.slice(start, end).trim();
-  assert.ok(statement.startsWith("eval(") && statement.endsWith(");"));
-  return vm.runInNewContext(statement.slice(5, -2));
+  assert.notEqual(studentScriptSource.length, 0, "student-page script must exist");
+  return studentScriptSource;
 }
 
 function extractBetween(source, startMarker, endMarker) {
@@ -107,9 +110,101 @@ function createBrowserContext(responseBody, status = 200) {
   return { context, fields, requests, card };
 }
 
+test("common login redirects administrator accounts to the admin dashboard", async () => {
+  const loginHandler = extractBetween(
+    studentScriptSource,
+    "async function doLogin() {",
+    "\nasync function submitEnrollment() {",
+  );
+  const destinations = [];
+  const button = { disabled: false };
+  const fields = {
+    uid: { value: "ADMIN01" },
+    pw: { value: "admin-password" },
+    loginErr: { textContent: "", style: {} },
+    login: { classList: { remove() {} } },
+    app: { style: {} },
+  };
+  const context = vm.createContext({
+    api: {
+      async login(identity, password) {
+        assert.equal(identity, "ADMIN01");
+        assert.equal(password, "admin-password");
+        return { success: true, user: { role: "admin" } };
+      },
+    },
+    currentUser: null,
+    document: {
+      getElementById(id) {
+        return fields[id] || null;
+      },
+      querySelector() {
+        return button;
+      },
+    },
+    window: {
+      location: {
+        assign(destination) {
+          destinations.push(destination);
+        },
+      },
+    },
+  });
+
+  vm.runInContext(loginHandler, context);
+  await vm.runInContext("doLogin()", context);
+
+  assert.deepEqual(destinations, ["/admin"]);
+  assert.equal(button.disabled, false);
+});
+
+test("admin logout clears the client user and redirects to common login", async () => {
+  const logoutHandler = extractBetween(
+    adminScriptSource,
+    "async function doLogout() {",
+    "\n}\n",
+  ) + "\n}";
+  const destinations = [];
+  const removedKeys = [];
+  let logoutCalls = 0;
+  const context = vm.createContext({
+    api: {
+      async logout() {
+        logoutCalls += 1;
+      },
+    },
+    localStorage: {
+      removeItem(key) {
+        removedKeys.push(key);
+      },
+    },
+    window: {
+      __mmaAdminSessionReady: true,
+      location: {
+        replace(destination) {
+          destinations.push(destination);
+        },
+      },
+    },
+    console: { error() {} },
+    alert(message) {
+      assert.fail(`unexpected logout error: ${message}`);
+    },
+  });
+
+  vm.runInContext(logoutHandler, context);
+  await vm.runInContext("doLogout()", context);
+
+  assert.equal(logoutCalls, 1);
+  assert.equal(context.window.__mmaAdminSessionReady, false);
+  assert.deepEqual(removedKeys, ["mma_currentUser", "mma_adminLastScreen"]);
+  assert.deepEqual(destinations, ["/student"]);
+});
+
 test("student form invokes the real handler and posts to the registration API", async () => {
   assert.match(studentTemplate, /onclick="submitEnrollment\(\)">Submit Enrollment/);
-  assert.match(studentTemplate, /app\.js'\) \}\}\?v=3/);
+  assert.match(studentTemplate, /app\.js'\) \}\}\?v=4/);
+  assert.match(studentTemplate, /student\.js'\) \}\}\?v=1/);
 
   const { context, requests, card } = createBrowserContext({
     success: true,

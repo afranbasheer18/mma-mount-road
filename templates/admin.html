@@ -8,24 +8,6 @@
 </head>
 <body class="session-checking" data-page="admin">
 
-<div id="login" class="screen active">
-  <div class="login-card">
-    <div class="login-mark">MM</div>
-    <h1>MMA Mess - Mount Road</h1>
-    <p class="sub">Admin / Management</p>
-    <div class="field"><label>Admin ID</label><input id="uid" type="text" placeholder="e.g. ADMIN01"></div>
-    <div class="field">
-      <label>Password</label>
-      <div class="pw-wrap">
-        <input id="pw" type="password" placeholder="Enter password">
-        <button type="button" onclick="togglePw()" id="pwToggle">Show</button>
-      </div>
-    </div>
-    <div class="err-msg" id="loginErr">Incorrect Admin ID or password.</div>
-    <button class="btn-primary" onclick="doLogin()">Login</button>
-  </div>
-</div>
-
 <div id="app">
   <aside class="side">
     <div class="brand">MM<span>Admin · <b id="activeUserCount">0 users</b></span></div>
@@ -395,6 +377,7 @@
   </div>
 </div>
 
-<script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+<script defer src="{{ url_for('static', filename='app.js') }}?v=4"></script>
+<script defer src="{{ url_for('static', filename='admin.js') }}?v=1"></script>
 </body>
 </html>
